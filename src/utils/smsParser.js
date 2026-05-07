@@ -59,7 +59,7 @@ const MERCHANT_CATEGORIES = {
   electricity: 'Utilities',
   bescom: 'Utilities',
   msedcl: 'Utilities',
-  tata power: 'Utilities',
+  'tata power': 'Utilities',
   water: 'Utilities',
   gas: 'Utilities',
   broadband: 'Utilities',
@@ -73,7 +73,7 @@ const MERCHANT_CATEGORIES = {
   // Entertainment
   netflix: 'Entertainment',
   hotstar: 'Entertainment',
-  amazon prime: 'Entertainment',
+  'amazon prime': 'Entertainment',
   spotify: 'Entertainment',
   youtube: 'Entertainment',
   bookmyshow: 'Entertainment',
