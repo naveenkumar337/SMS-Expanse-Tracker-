@@ -1,0 +1,46 @@
+{
+  "expo": {
+    "name": "SMS Expense Tracker",
+    "slug": "sms-expense-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1a73e8"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1a73e8"
+      },
+      "package": "com.smsexpensetracker.app",
+      "permissions": [
+        "android.permission.READ_SMS",
+        "android.permission.RECEIVE_SMS",
+        "android.permission.INTERNET"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 34,
+            "targetSdkVersion": 34,
+            "minSdkVersion": 23
+          }
+        }
+      ]
+    ],
+    "scheme": "smsexpensetracker",
+    "extra": {
+      "eas": {
+        "projectId": "f0a4c4ad-95f4-4a15-abed-b6802eb75aac"
+      }
+    },
+    "owner": "naveenajay337"
+  }
+}
