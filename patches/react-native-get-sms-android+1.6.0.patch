@@ -23,7 +23,7 @@ index 0de40fc..be7c83c 100644
  
  android {
 -    compileSdkVersion safeExtGet('compileSdkVersion', 28)
-+    compileSdkVersion safeExtGet('compileSdkVersion', 35)
++    compileSdkVersion safeExtGet('compileSdkVersion', 36)
  
      defaultConfig {
 -        minSdkVersion safeExtGet('minSdkVersion', 16)
