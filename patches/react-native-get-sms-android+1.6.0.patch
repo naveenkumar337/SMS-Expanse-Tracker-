@@ -28,7 +28,7 @@ index 0de40fc..be7c83c 100644
      defaultConfig {
 -        minSdkVersion safeExtGet('minSdkVersion', 16)
 -        targetSdkVersion safeExtGet('targetSdkVersion', 28)
-+        minSdkVersion safeExtGet('minSdkVersion', 23)
++        minSdkVersion safeExtGet('minSdkVersion', 24)
 +        targetSdkVersion safeExtGet('targetSdkVersion', 35)
          versionCode 1
          versionName "1.0.0"
