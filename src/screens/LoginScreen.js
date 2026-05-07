@@ -22,7 +22,7 @@ export default function LoginScreen({ onLoginSuccess }) {
       const result = await promptAsync();
       if (result.type === 'success') {
         const { code } = result.params;
-        const redirectUri = AuthSession.makeRedirectUri({ useProxy: true });
+        const redirectUri = AuthSession.makeRedirectUri();
         const tokens = await exchangeCodeForTokens(code, redirectUri);
         await saveTokens(tokens.access_token, tokens.refresh_token);
         onLoginSuccess(tokens.access_token);

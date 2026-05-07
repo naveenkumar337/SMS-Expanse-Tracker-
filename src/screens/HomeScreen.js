@@ -24,7 +24,6 @@ export default function HomeScreen() {
   const [syncMsg, setSyncMsg] = useState('');
   const [editTarget, setEditTarget] = useState(null);
   const [showAddCash, setShowAddCash] = useState(false);
-  const [showAddCash, setShowAddCash] = useState(false);
   const [accessToken, setAccessToken] = useState(null);
   const [loading, setLoading] = useState(true);
   const existingIds = useRef(new Set());
@@ -123,18 +122,6 @@ export default function HomeScreen() {
     }
   };
 
-  // ── Add cash transaction ─────────────────────────────────────────────────────
-  const handleAddCash = async (txn) => {
-    if (!accessToken) return;
-    try {
-      await appendTransaction(accessToken, txn);
-      setTransactions(prev => [{ ...txn, synced: true }, ...prev]);
-      setShowAddCash(false);
-    } catch (err) {
-      Alert.alert('Save failed', err.message);
-    }
-  };
-
   // ── Filter logic ─────────────────────────────────────────────────────────────
   const filtered = transactions.filter(t => {
     if (filter === 'All') return true;
@@ -142,7 +129,6 @@ export default function HomeScreen() {
     if (filter === 'This Week') {
       return dayjs(t.date, 'DD MMM YYYY').isAfter(dayjs().subtract(7, 'day'));
     }
-    if (filter === 'Cash') return t.isCash || t.bankPayment === 'Cash';
     if (filter === 'Cash') return t.isCash || t.bankPayment === 'Cash';
     if (filter === 'Canara') return t.bank === 'Canara';
     return true;

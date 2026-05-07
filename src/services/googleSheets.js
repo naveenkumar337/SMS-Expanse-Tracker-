@@ -44,7 +44,7 @@ export async function clearTokens() {
 
 // ─── OAuth Login ────────────────────────────────────────────────────────────────
 export function useGoogleAuth() {
-  const redirectUri = AuthSession.makeRedirectUri({ useProxy: true });
+  const redirectUri = AuthSession.makeRedirectUri();
 
   const [request, response, promptAsync] = AuthSession.useAuthRequest(
     {
