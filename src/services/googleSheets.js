@@ -9,7 +9,7 @@ import axios from 'axios';
 WebBrowser.maybeCompleteAuthSession();
 
 // ─── CONFIG — Fill these after Google Cloud Console setup ──────────────────────
-const GOOGLE_CLIENT_ID = '1093707675931-vos6b888k1mu0bn4fe26tlo3f72p3m6a.apps.googleusercontent.com';
+const GOOGLE_CLIENT_ID = '1093707675931-tr96f546m9om6905anh7nackd5000fkg.apps.googleusercontent.com';
 const SPREADSHEET_ID = '1L6Rip2V6yHy3-_3-zx40OrRvKUrWQ7q4mTjNg454Z0w'; // from Sheet URL
 const SHEET_NAME = 'Transactions';
 const SCOPES = [
