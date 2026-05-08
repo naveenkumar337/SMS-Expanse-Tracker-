@@ -16,14 +16,18 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#1a73e8"
       },
-      "action": "VIEW",
-      "autoVerify": true,
-      "data": [
+      "intentFilters": [
         {
-          "scheme": "smsexpensetracker"
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "smsexpensetracker"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
         }
       ],
-      "category": ["BROWSABLE", "DEFAULT"], 
       "package": "com.smsexpensetracker.app",
       "permissions": [
         "android.permission.READ_SMS",
