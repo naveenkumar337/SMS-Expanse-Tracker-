@@ -20,11 +20,7 @@
         {
           "action": "VIEW",
           "autoVerify": true,
-          "data": [
-            {
-              "scheme": "smsexpensetracker"
-            }
-          ],
+          "data": [{ "scheme": "smsexpensetracker" }],
           "category": ["BROWSABLE", "DEFAULT"]
         }
       ],

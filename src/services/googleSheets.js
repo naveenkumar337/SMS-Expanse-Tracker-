@@ -44,7 +44,7 @@ export async function clearTokens() {
 
 // ─── OAuth Login ────────────────────────────────────────────────────────────────
 export function useGoogleAuth() {
-  const redirectUri = 'https://auth.expo.io/@naveenajay337/sms-expense-tracker';
+  const redirectUri = AuthSession.makeRedirectUri({ scheme: 'smsexpensetracker' });
 
   const [request, response, promptAsync] = AuthSession.useAuthRequest(
     {
