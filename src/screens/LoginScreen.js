@@ -22,7 +22,7 @@ export default function LoginScreen({ onLoginSuccess }) {
       const result = await promptAsync();
       if (result.type === 'success') {
         const { code } = result.params;
-        const redirectUri = 'https://auth.expo.io/@naveenajay337/sms-expense-tracker';
+        const redirectUri = 'com.googleusercontent.apps.1093707675931-vos6b888k1mu0bn4fe26tlo3f72p3m6a:/oauth2redirect';
         const tokens = await exchangeCodeForTokens(code, redirectUri);
         await saveTokens(tokens.access_token, tokens.refresh_token);
         onLoginSuccess(tokens.access_token);
