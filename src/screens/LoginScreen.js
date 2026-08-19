@@ -1,31 +1,76 @@
 // src/screens/LoginScreen.js
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
-  ActivityIndicator, Alert, Image,
+  ActivityIndicator, Alert, Image, Linking,
 } from 'react-native';
-import * as AuthSession from 'expo-auth-session';
 import * as WebBrowser from 'expo-web-browser';
 import { colors } from '../utils/theme';
-import { useGoogleAuth, exchangeCodeForTokens, saveTokens } from '../services/googleSheets';
+import { signInWithGoogle, getCurrentUser, supabase, AUTH_REDIRECT_URI } from '../services/supabase';
 
 WebBrowser.maybeCompleteAuthSession();
 
+// Supabase's default OAuth flow ("implicit") returns access_token/refresh_token
+// in the URL *fragment* (after '#'), not the query string (after '?'). Some
+// error responses instead use a '?' query string. This helper checks both,
+// without relying on the DOM URL/URLSearchParams APIs (which only parse the
+// '?' portion and can behave inconsistently under Hermes).
+function extractParamsFromUrl(url) {
+  const params = {};
+  const paramsString = url.split('#')[1] || url.split('?')[1] || '';
+  paramsString.split('&').forEach(pair => {
+    if (!pair) return;
+    const [key, value] = pair.split('=');
+    if (key) params[decodeURIComponent(key)] = decodeURIComponent(value || '');
+  });
+  return params;
+}
+
 export default function LoginScreen({ onLoginSuccess }) {
   const [loading, setLoading] = useState(false);
-  const { request, response, promptAsync } = useGoogleAuth();
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    // Check if user is already logged in
+    checkExistingSession();
+
+    // Handle the case where the OAuth browser redirects back into the app
+    // while it's already running (e.g. backgrounded, not fully closed).
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      if (url.includes('auth/callback')) {
+        handleAuthCallback(url);
+      }
+    });
+
+    return () => subscription.remove();
+  }, []);
+
+  const checkExistingSession = async () => {
+    try {
+      const user = await getCurrentUser();
+      if (user) {
+        onLoginSuccess(user);
+      }
+    } catch (err) {
+      console.log('No existing session');
+    } finally {
+      setChecking(false);
+    }
+  };
 
   const handleLogin = async () => {
     setLoading(true);
     try {
-      const result = await promptAsync();
-      if (result.type === 'success') {
-        const { code } = result.params;
-        const redirectUri = 'com.googleusercontent.apps.1093707675931-vos6b888k1mu0bn4fe26tlo3f72p3m6a:/oauth2redirect';
-        const tokens = await exchangeCodeForTokens(code, redirectUri);
-        await saveTokens(tokens.access_token, tokens.refresh_token);
-        onLoginSuccess(tokens.access_token);
+      const { url } = await signInWithGoogle();
+      // Opens the Google OAuth page in an in-app browser and waits for the
+      // redirect back to AUTH_REDIRECT_URI, returning that final URL directly
+      // (this is the current, supported replacement for the old/removed
+      // `AuthSession.startAsync`).
+      const result = await WebBrowser.openAuthSessionAsync(url, AUTH_REDIRECT_URI);
+
+      if (result.type === 'success' && result.url) {
+        await handleAuthCallback(result.url);
       } else {
         Alert.alert('Login cancelled', 'Please try again to continue.');
       }
@@ -35,6 +80,39 @@ export default function LoginScreen({ onLoginSuccess }) {
       setLoading(false);
     }
   };
+
+  const handleAuthCallback = async (url) => {
+    try {
+      const params = extractParamsFromUrl(url);
+
+      if (params.access_token && params.refresh_token) {
+        // Supabase doesn't auto-detect the redirect URL in React Native, so
+        // the session must be established explicitly. This is what actually
+        // triggers the 'SIGNED_IN' event that App.js listens for.
+        const { data, error } = await supabase.auth.setSession({
+          access_token: params.access_token,
+          refresh_token: params.refresh_token,
+        });
+        if (error) throw error;
+
+        const user = data?.user || (await getCurrentUser());
+        onLoginSuccess(user);
+      } else if (params.error) {
+        Alert.alert('Login failed', params.error_description || params.error);
+      }
+    } catch (err) {
+      console.error('Auth callback error:', err);
+      Alert.alert('Login failed', err.message);
+    }
+  };
+
+  if (checking) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -48,7 +126,7 @@ export default function LoginScreen({ onLoginSuccess }) {
         <View style={styles.featureList}>
           {[
             '📩 Auto-reads bank SMS',
-            '📊 Saves to Google Sheets',
+            '📊 Saves to secure database',
             '✏️ Edit & categorise transactions',
             '👨‍👩‍👧 Track who you spent for',
           ].map(f => (
@@ -59,7 +137,7 @@ export default function LoginScreen({ onLoginSuccess }) {
         <TouchableOpacity
           style={styles.googleBtn}
           onPress={handleLogin}
-          disabled={loading || !request}
+          disabled={loading}
         >
           {loading
             ? <ActivityIndicator color="#fff" />
@@ -68,7 +146,7 @@ export default function LoginScreen({ onLoginSuccess }) {
         </TouchableOpacity>
 
         <Text style={styles.note}>
-          Your data stays in your own Google Sheet. We never store it elsewhere.
+          Your data stays in your own secure database. We never store it elsewhere.
         </Text>
       </View>
     </View>

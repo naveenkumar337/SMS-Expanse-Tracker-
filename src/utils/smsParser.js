@@ -131,6 +131,11 @@ export function detectPaymentMode(body) {
   // Net banking
   if (b.includes('netbanking') || b.includes('net banking') || b.includes('neft') || b.includes('imps') || b.includes('rtgs')) return 'Net Banking';
 
+  // "Sent Rs.X From <Bank> A/C ... To <recipient>" is HDFC's standard UPI
+  // transfer confirmation format. It doesn't literally contain the word
+  // "UPI" in the body, but is a UPI transfer unless a card is mentioned.
+  if (b.includes('sent') && b.includes('a/c') && !b.includes('card')) return 'UPI';
+
   // Fallback — check for card number patterns like XX1234
   if (/xx\d{4}/i.test(b)) {
     if (b.includes('credit')) return 'Credit Card';
@@ -162,19 +167,56 @@ export function extractAmount(body) {
 
 // ─── Extract merchant name ──────────────────────────────────────────────────────
 export function extractMerchant(body) {
+  // UPI VPA handles (e.g. "to VPA swiggy@ybl", "swiggy@icici") are the most common
+  // real-world format for HDFC/Canara UPI debit SMS — check this first.
+  const vpaPattern = /(?:vpa\s+)?([a-zA-Z0-9.\-_]+)@[a-zA-Z0-9.\-_]+/i;
+  const vpaMatch = body.match(vpaPattern);
+  if (vpaMatch) {
+    let handle = vpaMatch[1].trim();
+    // Merchant VPAs are often "name.randomid" (e.g. Paytm's dynamic
+    // "paytm.s16r1h3@pty") — the leading segment is the readable merchant
+    // name; everything after the dot is a per-transaction identifier that's
+    // meaningless to show to the user.
+    if (handle.includes('.')) {
+      const [firstSegment] = handle.split('.');
+      if (firstSegment.length >= 3) handle = firstSegment;
+    }
+    return handle;
+  }
+
   // Patterns: "at MERCHANT", "to MERCHANT", "towards MERCHANT"
+  // Lazy quantifier + lookahead so we stop at "on <date>"/punctuation instead of
+  // greedily swallowing trailing text like "AMAZON on 18-08-26".
   const patterns = [
-    /(?:at|to|towards|for)\s+([A-Za-z][A-Za-z0-9\s\.\-&']{2,30})(?:\s+on|\s+for|\s+via|\s*\.|\s*,|$)/i,
-    /(?:merchant[:\s]+)([A-Za-z][A-Za-z0-9\s\.\-&']{2,30})/i,
+    /(?:at|to|towards|for)\s+([A-Za-z][A-Za-z0-9\s\.\-&']{1,30}?)(?=\s+on\s+\d|\s+for\s|\s+via\s|\s*\.|\s*,|\s*$)/i,
+    /(?:merchant[:\s]+)([A-Za-z][A-Za-z0-9\s\.\-&']{1,30}?)(?=\s+on\s+\d|\s*\.|\s*,|\s*$)/i,
   ];
+
+  // Generic bank/fraud-reporting boilerplate that these SMS templates append
+  // (e.g. "...Dial 1930 to report cyber fraud- Canara Bank") can otherwise be
+  // mistakenly captured by the "to/at/for MERCHANT" pattern above, since it's
+  // just scanning the whole message for the first plausible-looking match.
+  const boilerplateWords = ['report', 'fraud', 'dial', 'block', 'suspect', 'cyber', 'call', 'blockupi', 'complain'];
 
   for (const pattern of patterns) {
     const match = body.match(pattern);
     if (match) {
-      return match[1].trim().replace(/\s+/g, ' ');
+      const candidate = match[1].trim().replace(/\s+/g, ' ');
+      const isBoilerplate = boilerplateWords.some(w => candidate.toLowerCase().includes(w));
+      if (!isBoilerplate) return candidate;
     }
   }
   return '';
+}
+
+// ─── Simple deterministic string hash (not cryptographic, just stable) ─────────
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0; // force 32-bit int
+  }
+  return Math.abs(hash).toString(36);
 }
 
 // ─── Check if SMS is a bank transaction ────────────────────────────────────────
@@ -187,7 +229,10 @@ export function isBankTransaction(sender, body) {
   if (!isBank) return false;
 
   // Must contain debit/transaction keywords
-  const txnKeywords = ['debited', 'debit', 'spent', 'payment', 'paid', 'transaction', 'purchase', 'withdrawn'];
+  // 'sent' and 'txn' cover HDFC's "Sent Rs.X From..." UPI transfer format
+  // and "Txn Rs.X On <Bank> Card..." card-transaction format, both of which
+  // don't use any of the other more generic keywords below.
+  const txnKeywords = ['debited', 'debit', 'spent', 'payment', 'paid', 'transaction', 'purchase', 'withdrawn', 'sent', 'txn'];
   const hasTxn = txnKeywords.some(k => s.includes(k));
 
   // Must contain amount pattern
@@ -210,8 +255,12 @@ export function parseSMS(sms) {
 
   if (!amount) return null;
 
+  // Deterministic ID (no randomness) so the same SMS always produces the same
+  // ID across repeated syncs — this is required for duplicate detection to work.
+  const id = `${date}_${amount}_${simpleHash(body)}`;
+
   return {
-    id: `${date}_${amount}_${Math.random().toString(36).substr(2, 6)}`,
+    id,
     purpose,
     merchant,
     cost: amount,

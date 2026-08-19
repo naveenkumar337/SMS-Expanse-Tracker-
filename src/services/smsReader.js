@@ -11,16 +11,19 @@ export async function requestSMSPermission() {
   if (Platform.OS !== 'android') return false;
 
   try {
-    const granted = await PermissionsAndroid.request(
+    // READ_SMS is needed for the historical inbox scan (readSMSFromDevice).
+    // RECEIVE_SMS is needed separately, only for the real-time listener
+    // (SmsReceiverModule) to receive the SMS_RECEIVED broadcast from the OS.
+    // We request both together (Android bundles them into one "SMS" dialog),
+    // but only gate this function's return value on READ_SMS — the historical
+    // scan must keep working even if a user denies RECEIVE_SMS specifically
+    // (and vice versa), instead of failing outright if either one is denied.
+    const results = await PermissionsAndroid.requestMultiple([
       PermissionsAndroid.PERMISSIONS.READ_SMS,
-      {
-        title: 'SMS Permission Required',
-        message: 'This app needs to read your SMS to track bank transactions automatically.',
-        buttonPositive: 'Allow',
-        buttonNegative: 'Deny',
-      }
-    );
-    return granted === PermissionsAndroid.RESULTS.GRANTED;
+      PermissionsAndroid.PERMISSIONS.RECEIVE_SMS,
+    ]);
+
+    return results[PermissionsAndroid.PERMISSIONS.READ_SMS] === PermissionsAndroid.RESULTS.GRANTED;
   } catch (err) {
     console.warn('SMS permission error:', err);
     return false;
@@ -28,7 +31,7 @@ export async function requestSMSPermission() {
 }
 
 // ─── Read SMS from device ───────────────────────────────────────────────────────
-export function readSMSFromDevice(daysBack = 90) {
+export function readSMSFromDevice(daysBack = 60) {
   return new Promise((resolve, reject) => {
     const minDate = dayjs().subtract(daysBack, 'day').valueOf();
 
@@ -67,7 +70,7 @@ export async function readAndParseBankSMS(existingIds = new Set()) {
     throw new Error('SMS permission denied. Please allow SMS access in app settings.');
   }
 
-  const rawMessages = await readSMSFromDevice(90); // last 90 days
+  const rawMessages = await readSMSFromDevice(60); // last 60 days
   const transactions = parseAllSMS(rawMessages);
 
   // Filter out already-known transactions

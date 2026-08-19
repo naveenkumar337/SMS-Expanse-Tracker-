@@ -7,62 +7,148 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import dayjs from 'dayjs';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
 import { colors } from '../utils/theme';
 import TransactionItem from '../components/TransactionItem';
 import EditTransactionSheet from '../components/EditTransactionSheet';
 import AddCashSheet from '../components/AddCashSheet';
 import { readAndParseBankSMS } from '../services/smsReader';
-import { appendTransaction, updateTransaction, fetchTransactions } from '../services/googleSheets';
-import { loadAccessToken } from '../services/googleSheets';
+import { startSmsListener } from '../services/smsListener';
+import { 
+  getTransactions, 
+  addTransaction, 
+  updateTransaction as updateTransactionDB,
+  subscribeToTransactions,
+  DuplicateTransactionError,
+} from '../services/transactions';
+import { supabase } from '../services/supabase';
+
+// Required for dayjs(dateString, 'DD MMM YYYY') to actually respect the format
+// argument below — without this plugin, dayjs silently ignores the format and
+// falls back to native Date parsing, which is not guaranteed to understand
+// "DD MMM YYYY" strings consistently across JS engines (e.g. Hermes vs V8).
+dayjs.extend(customParseFormat);
 
 const FILTERS = ['All', 'Today', 'This Week', 'Cash', 'HDFC', 'Canara'];
 
-export default function HomeScreen() {
+export default function HomeScreen({ user }) {
   const [transactions, setTransactions] = useState([]);
   const [filter, setFilter] = useState('All');
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [editTarget, setEditTarget] = useState(null);
   const [showAddCash, setShowAddCash] = useState(false);
-  const [accessToken, setAccessToken] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Tracks the deterministic SMS-derived ids (transactions.smsId / DB column sms_id)
+  // that have already been imported — NOT the Supabase row `id` (UUID), since the
+  // SMS parser never produces UUIDs. Comparing against smsId is what makes dedup work.
   const existingIds = useRef(new Set());
+  // Guards against the very first `useFocusEffect` firing (which happens at
+  // mount, roughly alongside the effect below) from starting a sync before
+  // `loadTransactions()` has finished populating `existingIds` — without this,
+  // every cold start would re-scan and re-attempt-insert every SMS in the
+  // window (harmless thanks to the DB unique constraint, but wasteful).
+  const isFirstFocus = useRef(true);
 
-  // ── Load token and initial data ──────────────────────────────────────────────
+  // ── Load initial data, then run the first SMS sync only once existingIds
+  // is populated (see isFirstFocus above) ─────────────────────────────────────
   useEffect(() => {
     (async () => {
-      const token = await loadAccessToken();
-      setAccessToken(token);
-      if (token) {
-        await loadSheetTransactions(token);
-      }
-      setLoading(false);
+      await loadTransactions();
+      syncSMS();
     })();
+
+    // Set up real-time subscription
+    const subscription = subscribeToTransactions((payload) => {
+      const transformData = (data) => ({
+        id: data.id,
+        smsId: data.sms_id,
+        purpose: data.purpose,
+        cost: data.amount,
+        date: data.date,
+        spentFor: data.spent_for,
+        bank: data.bank,
+        paymentMode: data.payment_mode,
+        bankPayment: `${data.bank || ''} — ${data.payment_mode || ''}`,
+        merchant: data.merchant,
+        rawSMS: data.raw_sms,
+        isCash: data.is_cash,
+        synced: true,
+      });
+
+      if (payload.eventType === 'INSERT') {
+        setTransactions(prev => [transformData(payload.new), ...prev]);
+      } else if (payload.eventType === 'UPDATE') {
+        setTransactions(prev => 
+          prev.map(t => t.id === payload.new.id ? transformData(payload.new) : t)
+        );
+      } else if (payload.eventType === 'DELETE') {
+        setTransactions(prev => 
+          prev.filter(t => t.id !== payload.old.id)
+        );
+      }
+    });
+
+    return () => {
+      supabase.removeChannel(subscription);
+    };
   }, []);
 
-  // ── Auto-sync SMS on focus ───────────────────────────────────────────────────
-  useFocusEffect(
-    useCallback(() => {
-      if (accessToken) syncSMS(accessToken);
-    }, [accessToken])
-  );
-
-  // ── Load from Google Sheet ───────────────────────────────────────────────────
-  const loadSheetTransactions = async (token) => {
+  const loadTransactions = async () => {
     try {
-      const sheetTxns = await fetchTransactions(token);
-      setTransactions(sheetTxns);
-      sheetTxns.forEach(t => existingIds.current.add(t.id));
+      const data = await getTransactions();
+      setTransactions(data);
+      data.forEach(t => {
+        if (t.smsId) existingIds.current.add(t.smsId);
+      });
     } catch (err) {
-      // Sheet might be empty on first run — that's fine
+      Alert.alert('Load failed', err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
+  // ── Real-time SMS listener (instant capture while app process is alive) ───────
+  // Note: the actual insert into `transactions` state happens via the Supabase
+  // realtime subscription above (INSERT event) — addTransaction() here triggers
+  // that automatically. We only use onNewTransaction for a lightweight UI ping,
+  // to avoid double-adding the same transaction to the list.
+  useEffect(() => {
+    const stopListener = startSmsListener({
+      existingIds: existingIds.current,
+      onNewTransaction: () => {
+        setSyncMsg('New transaction detected');
+        setTimeout(() => setSyncMsg(''), 3000);
+      },
+      onError: (err) => {
+        console.warn('SMS listener error:', err.message);
+      },
+    });
+
+    return () => stopListener();
+  }, []);
+
+  // ── Auto-sync SMS on focus (subsequent focuses only — see isFirstFocus) ──────
+  useFocusEffect(
+    useCallback(() => {
+      if (isFirstFocus.current) {
+        // Skip: the mount effect above already runs the initial sync once
+        // loadTransactions() has populated existingIds. Calling syncSMS()
+        // here too would race ahead of that with a still-empty dedup set.
+        isFirstFocus.current = false;
+        return;
+      }
+      syncSMS();
+    }, [])
+  );
+
   // ── Sync SMS → Parse → Save new ones ─────────────────────────────────────────
-  const syncSMS = async (token) => {
+  const syncSMS = async () => {
     setSyncing(true);
     setSyncMsg('Reading SMS...');
     try {
+      // existingIds holds smsId values (deterministic hash from smsParser.js),
+      // so this correctly skips SMS that were already imported in a previous sync.
       const { newOnes } = await readAndParseBankSMS(existingIds.current);
 
       if (newOnes.length === 0) {
@@ -73,17 +159,24 @@ export default function HomeScreen() {
 
       setSyncMsg(`Saving ${newOnes.length} new transactions...`);
 
+      let savedCount = 0;
       for (const txn of newOnes) {
-        await appendTransaction(token, txn);
+        // Mark as seen up-front so a duplicate later in this same loop
+        // (e.g. two identical SMS) isn't attempted twice.
         existingIds.current.add(txn.id);
+        try {
+          await addTransaction(txn);
+          savedCount++;
+        } catch (err) {
+          if (err instanceof DuplicateTransactionError) {
+            // Already imported in a previous sync (DB unique constraint caught it) — skip silently.
+            continue;
+          }
+          throw err;
+        }
       }
 
-      setTransactions(prev => {
-        const updated = [...newOnes.map(t => ({ ...t, synced: true })), ...prev];
-        return updated;
-      });
-
-      setSyncMsg(`${newOnes.length} new transactions added`);
+      setSyncMsg(savedCount > 0 ? `${savedCount} new transactions added` : 'All up to date');
       setTimeout(() => setSyncMsg(''), 4000);
     } catch (err) {
       setSyncMsg('Sync failed');
@@ -96,10 +189,9 @@ export default function HomeScreen() {
 
   // ── Add cash transaction ─────────────────────────────────────────────────────
   const handleAddCash = async (cashTxn) => {
-    if (!accessToken) return;
     try {
-      await appendTransaction(accessToken, cashTxn);
-      setTransactions(prev => [{ ...cashTxn, synced: true }, ...prev]);
+      const added = await addTransaction(cashTxn);
+      setTransactions(prev => [added, ...prev]);
       setShowAddCash(false);
     } catch (err) {
       Alert.alert('Save failed', err.message);
@@ -108,13 +200,10 @@ export default function HomeScreen() {
 
   // ── Edit save ────────────────────────────────────────────────────────────────
   const handleSave = async (updated) => {
-    if (!accessToken) return;
     try {
-      await updateTransaction(accessToken, updated.rowIndex ?? 0, updated);
+      const updatedTxn = await updateTransactionDB(updated.id, updated);
       setTransactions(prev =>
-        prev.map(t =>
-          t.id === updated.id ? { ...updated, bankPayment: `${updated.bank} — ${updated.paymentMode}` } : t
-        )
+        prev.map(t => t.id === updated.id ? updatedTxn : t)
       );
       setEditTarget(null);
     } catch (err) {
@@ -130,6 +219,7 @@ export default function HomeScreen() {
       return dayjs(t.date, 'DD MMM YYYY').isAfter(dayjs().subtract(7, 'day'));
     }
     if (filter === 'Cash') return t.isCash || t.bankPayment === 'Cash';
+    if (filter === 'HDFC') return t.bank === 'HDFC';
     if (filter === 'Canara') return t.bank === 'Canara';
     return true;
   });
@@ -174,7 +264,7 @@ export default function HomeScreen() {
           <TouchableOpacity style={styles.addCashHeaderBtn} onPress={() => setShowAddCash(true)}>
             <Text style={styles.addCashHeaderText}>+ Cash</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => syncSMS(accessToken)} disabled={syncing}>
+          <TouchableOpacity onPress={() => syncSMS()} disabled={syncing}>
             {syncing
               ? <ActivityIndicator color="#fff" size="small" />
               : <Text style={styles.refreshIcon}>🔄</Text>
@@ -249,7 +339,7 @@ export default function HomeScreen() {
             </View>
           )}
           refreshControl={
-            <RefreshControl refreshing={syncing} onRefresh={() => syncSMS(accessToken)} colors={[colors.primary]} />
+            <RefreshControl refreshing={syncing} onRefresh={() => syncSMS()} colors={[colors.primary]} />
           }
           stickySectionHeadersEnabled={false}
         />
@@ -257,7 +347,7 @@ export default function HomeScreen() {
 
       {/* FAB row */}
       <View style={styles.fabRow}>
-        <TouchableOpacity style={styles.fab} onPress={() => syncSMS(accessToken)} disabled={syncing}>
+        <TouchableOpacity style={styles.fab} onPress={() => syncSMS()} disabled={syncing}>
           <Text style={styles.fabText}>{syncing ? 'Scanning...' : '🔄 Scan SMS'}</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.fabCash} onPress={() => setShowAddCash(true)}>

@@ -10,19 +10,41 @@ import { colors, SPENT_FOR_OPTIONS, BANK_OPTIONS, PAYMENT_MODE_OPTIONS } from '.
 export default function EditTransactionSheet({ visible, transaction, onSave, onClose }) {
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
+  const [errors, setErrors] = useState({});
 
   useEffect(() => {
     if (transaction) setForm({ ...transaction });
+    setErrors({});
   }, [transaction]);
 
   if (!transaction) return null;
 
-  const update = (field, value) => setForm(prev => ({ ...prev, [field]: value }));
+  const update = (field, value) => {
+    setForm(prev => ({ ...prev, [field]: value }));
+    if (errors[field]) setErrors(prev => ({ ...prev, [field]: null }));
+  };
+
+  const validate = () => {
+    const e = {};
+    if (!form.cost || isNaN(Number(form.cost)) || Number(form.cost) <= 0) {
+      e.cost = 'Enter a valid amount';
+    }
+    if (!form.date || !String(form.date).trim()) {
+      e.date = 'Date is required';
+    }
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  };
 
   const handleSave = async () => {
+    if (!validate()) return;
     setSaving(true);
     try {
-      await onSave({ ...form, bankPayment: `${form.bank} — ${form.paymentMode}` });
+      await onSave({
+        ...form,
+        cost: parseFloat(form.cost), // form.cost is a string from TextInput — coerce back to a number
+        bankPayment: `${form.bank} — ${form.paymentMode}`,
+      });
     } finally {
       setSaving(false);
     }
@@ -61,25 +83,27 @@ export default function EditTransactionSheet({ visible, transaction, onSave, onC
               <View style={styles.group}>
                 <Text style={styles.label}>Cost (₹)</Text>
                 <TextInput
-                  style={styles.input}
+                  style={[styles.input, errors.cost && styles.inputError]}
                   value={String(form.cost || '')}
                   onChangeText={v => update('cost', v)}
                   keyboardType="numeric"
                   placeholder="0"
                   placeholderTextColor={colors.textHint}
                 />
+                {errors.cost ? <Text style={styles.errorText}>{errors.cost}</Text> : null}
               </View>
 
               {/* Date */}
               <View style={styles.group}>
                 <Text style={styles.label}>Date</Text>
                 <TextInput
-                  style={styles.input}
+                  style={[styles.input, errors.date && styles.inputError]}
                   value={form.date}
                   onChangeText={v => update('date', v)}
                   placeholder="DD MMM YYYY"
                   placeholderTextColor={colors.textHint}
                 />
+                {errors.date ? <Text style={styles.errorText}>{errors.date}</Text> : null}
               </View>
 
               {/* Bank & Payment Mode */}
@@ -187,6 +211,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: colors.textPrimary,
   },
+  inputError: { borderColor: colors.danger },
+  errorText: { fontSize: 11, color: colors.danger, marginTop: 3 },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   pickerWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   pill: {
