@@ -20,15 +20,23 @@
         {
           "action": "VIEW",
           "autoVerify": true,
-          "data": [{ "scheme": "smsexpensetracker" }],
-          "category": ["BROWSABLE", "DEFAULT"]
+          "data": [
+            {
+              "scheme": "smsexpensetracker"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
         }
       ],
       "package": "com.smsexpensetracker.app",
       "permissions": [
         "android.permission.READ_SMS",
         "android.permission.RECEIVE_SMS",
-        "android.permission.INTERNET"
+        "android.permission.INTERNET",
+        "android.permission.CAMERA"
       ]
     },
     "plugins": [
@@ -42,7 +50,8 @@
             "minSdkVersion": 24
           }
         }
-      ]
+      ],
+      "@react-native-community/datetimepicker"
     ],
     "scheme": "smsexpensetracker",
     "extra": {

@@ -3,25 +3,28 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
-  Alert, ActivityIndicator, RefreshControl, SectionList,
+  Alert, ActivityIndicator, RefreshControl, SectionList, TextInput,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
-import { colors } from '../utils/theme';
+import { colors, BANK_OPTIONS, PAYMENT_MODE_OPTIONS, SPENT_FOR_OPTIONS } from '../utils/theme';
 import TransactionItem from '../components/TransactionItem';
 import EditTransactionSheet from '../components/EditTransactionSheet';
 import AddCashSheet from '../components/AddCashSheet';
+import ExportSheet from '../components/ExportSheet';
+import PeriodViewSheet from '../components/PeriodViewSheet';
+import FilterSheet from '../components/FilterSheet';
 import { readAndParseBankSMS } from '../services/smsReader';
 import { startSmsListener } from '../services/smsListener';
 import { 
   getTransactions, 
   addTransaction, 
   updateTransaction as updateTransactionDB,
-  subscribeToTransactions,
+  deleteTransaction,
   DuplicateTransactionError,
 } from '../services/transactions';
-import { supabase } from '../services/supabase';
+import { signOut } from '../services/auth';
 
 // Required for dayjs(dateString, 'DD MMM YYYY') to actually respect the format
 // argument below — without this plugin, dayjs silently ignores the format and
@@ -29,15 +32,33 @@ import { supabase } from '../services/supabase';
 // "DD MMM YYYY" strings consistently across JS engines (e.g. Hermes vs V8).
 dayjs.extend(customParseFormat);
 
-const FILTERS = ['All', 'Today', 'This Week', 'Cash', 'HDFC', 'Canara'];
+const FILTERS = ['All', 'Today', 'This Week', 'This Month', 'Income', 'Expense', 'Cash', 'More...'];
 
-export default function HomeScreen({ user }) {
+// Sorts transactions recent -> past by their actual date (not insertion
+// order). Used whenever the in-memory list is mutated (real-time INSERT,
+// manual cash add) so a transaction never jumps to the top of the list
+// purely because it was the most recently added, rather than the most recent
+// by date — mirrors the DB-level `txn_date` ordering in getTransactions().
+const sortByDateDesc = (list) =>
+  [...list].sort((a, b) => {
+    const da = dayjs(a.date, 'DD MMM YYYY');
+    const db = dayjs(b.date, 'DD MMM YYYY');
+    if (!da.isValid() || !db.isValid()) return 0;
+    return db.valueOf() - da.valueOf();
+  });
+
+export default function HomeScreen({ user, onLogout }) {
   const [transactions, setTransactions] = useState([]);
   const [filter, setFilter] = useState('All');
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [editTarget, setEditTarget] = useState(null);
   const [showAddCash, setShowAddCash] = useState(false);
+  const [showExport, setShowExport] = useState(false);
+  const [showPeriodView, setShowPeriodView] = useState(false);
+  const [showFilterSheet, setShowFilterSheet] = useState(false);
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   // Tracks the deterministic SMS-derived ids (transactions.smsId / DB column sms_id)
   // that have already been imported — NOT the Supabase row `id` (UUID), since the
@@ -52,46 +73,20 @@ export default function HomeScreen({ user }) {
 
   // ── Load initial data, then run the first SMS sync only once existingIds
   // is populated (see isFirstFocus above) ─────────────────────────────────────
+  // NOTE: this used to also open a Supabase real-time subscription on the
+  // `transactions` table, kept in sync purely by Postgres RLS filtering rows
+  // to `auth.uid()`. Now that sign-in is custom (no Supabase-Auth session —
+  // see src/services/auth.js), the table has no client-facing RLS policies
+  // at all (access is only via the session-checked RPCs in
+  // supabase-migration-custom-auth.sql), so that subscription can no longer
+  // deliver anything. The list is instead kept in sync purely from the
+  // optimistic updates below (syncSMS/handleAddCash/handleSave), which is
+  // sufficient for this single-device app.
   useEffect(() => {
     (async () => {
       await loadTransactions();
       syncSMS();
     })();
-
-    // Set up real-time subscription
-    const subscription = subscribeToTransactions((payload) => {
-      const transformData = (data) => ({
-        id: data.id,
-        smsId: data.sms_id,
-        purpose: data.purpose,
-        cost: data.amount,
-        date: data.date,
-        spentFor: data.spent_for,
-        bank: data.bank,
-        paymentMode: data.payment_mode,
-        bankPayment: `${data.bank || ''} — ${data.payment_mode || ''}`,
-        merchant: data.merchant,
-        rawSMS: data.raw_sms,
-        isCash: data.is_cash,
-        synced: true,
-      });
-
-      if (payload.eventType === 'INSERT') {
-        setTransactions(prev => [transformData(payload.new), ...prev]);
-      } else if (payload.eventType === 'UPDATE') {
-        setTransactions(prev => 
-          prev.map(t => t.id === payload.new.id ? transformData(payload.new) : t)
-        );
-      } else if (payload.eventType === 'DELETE') {
-        setTransactions(prev => 
-          prev.filter(t => t.id !== payload.old.id)
-        );
-      }
-    });
-
-    return () => {
-      supabase.removeChannel(subscription);
-    };
   }, []);
 
   const loadTransactions = async () => {
@@ -109,14 +104,21 @@ export default function HomeScreen({ user }) {
   };
 
   // ── Real-time SMS listener (instant capture while app process is alive) ───────
-  // Note: the actual insert into `transactions` state happens via the Supabase
-  // realtime subscription above (INSERT event) — addTransaction() here triggers
-  // that automatically. We only use onNewTransaction for a lightweight UI ping,
-  // to avoid double-adding the same transaction to the list.
+  // Update the visible list directly from the save result — same reasoning
+  // as in syncSMS() below: the Supabase real-time subscription's websocket
+  // handshake is async and may still be connecting (e.g. right after app
+  // launch) when a new SMS arrives and gets saved, in which case its INSERT
+  // event would never reach this session and the transaction would stay
+  // invisible until the app is fully reopened, even though it was already
+  // saved correctly. The `some(...)` guard avoids a duplicate entry if the
+  // real-time event does also arrive for the same row.
   useEffect(() => {
     const stopListener = startSmsListener({
       existingIds: existingIds.current,
-      onNewTransaction: () => {
+      onNewTransaction: (saved) => {
+        setTransactions(prev =>
+          prev.some(t => t.id === saved.id) ? prev : sortByDateDesc([saved, ...prev])
+        );
         setSyncMsg('New transaction detected');
         setTimeout(() => setSyncMsg(''), 3000);
       },
@@ -165,8 +167,21 @@ export default function HomeScreen({ user }) {
         // (e.g. two identical SMS) isn't attempted twice.
         existingIds.current.add(txn.id);
         try {
-          await addTransaction(txn);
+          const saved = await addTransaction(txn);
           savedCount++;
+          // Update the visible list directly from the save result rather than
+          // relying solely on the real-time subscription's INSERT event.
+          // The real-time channel's websocket handshake is async and can
+          // still be connecting when this sync runs (e.g. right at app
+          // startup) — if it isn't live yet when this insert happens, the
+          // event is never delivered to this session, so the new
+          // transaction would otherwise stay invisible until the next full
+          // reload even though it's already safely saved in the database.
+          // The `some(...)` guard avoids a duplicate list entry in case the
+          // real-time event *does* also arrive for the same row.
+          setTransactions(prev =>
+            prev.some(t => t.id === saved.id) ? prev : sortByDateDesc([saved, ...prev])
+          );
         } catch (err) {
           if (err instanceof DuplicateTransactionError) {
             // Already imported in a previous sync (DB unique constraint caught it) — skip silently.
@@ -191,7 +206,9 @@ export default function HomeScreen({ user }) {
   const handleAddCash = async (cashTxn) => {
     try {
       const added = await addTransaction(cashTxn);
-      setTransactions(prev => [added, ...prev]);
+      setTransactions(prev =>
+        prev.some(t => t.id === added.id) ? prev : sortByDateDesc([added, ...prev])
+      );
       setShowAddCash(false);
     } catch (err) {
       Alert.alert('Save failed', err.message);
@@ -203,7 +220,7 @@ export default function HomeScreen({ user }) {
     try {
       const updatedTxn = await updateTransactionDB(updated.id, updated);
       setTransactions(prev =>
-        prev.map(t => t.id === updated.id ? updatedTxn : t)
+        sortByDateDesc(prev.map(t => t.id === updated.id ? updatedTxn : t))
       );
       setEditTarget(null);
     } catch (err) {
@@ -211,16 +228,73 @@ export default function HomeScreen({ user }) {
     }
   };
 
-  // ── Filter logic ─────────────────────────────────────────────────────────────
+  // ── Delete transaction ────────────────────────────────────────────────────────
+  const handleDelete = async (transaction) => {
+    Alert.alert(
+      'Delete Transaction',
+      `Are you sure you want to delete this transaction?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteTransaction(transaction.id);
+              setTransactions(prev => prev.filter(t => t.id !== transaction.id));
+            } catch (err) {
+              Alert.alert('Delete failed', err.message);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  // ── Logout ───────────────────────────────────────────────────────────────────
+  const handleLogout = () => {
+    Alert.alert('Log out', 'Are you sure you want to log out?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Log out',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await signOut();
+          } finally {
+            onLogout?.();
+          }
+        },
+      },
+    ]);
+  };
+
+  // ── Filter + search logic ────────────────────────────────────────────────────
   const filtered = transactions.filter(t => {
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      const matchesSearch =
+        (t.merchant || '').toLowerCase().includes(q) ||
+        (t.purpose || '').toLowerCase().includes(q) ||
+        (t.bank || '').toLowerCase().includes(q);
+      if (!matchesSearch) return false;
+    }
     if (filter === 'All') return true;
     if (filter === 'Today') return t.date === dayjs().format('DD MMM YYYY');
     if (filter === 'This Week') {
       return dayjs(t.date, 'DD MMM YYYY').isAfter(dayjs().subtract(7, 'day'));
     }
+    if (filter === 'This Month') {
+      return dayjs(t.date, 'DD MMM YYYY').month() === dayjs().month();
+    }
+    if (filter === 'Income') return t.type === 'income';
+    if (filter === 'Expense') return t.type !== 'income';
     if (filter === 'Cash') return t.isCash || t.bankPayment === 'Cash';
-    if (filter === 'HDFC') return t.bank === 'HDFC';
-    if (filter === 'Canara') return t.bank === 'Canara';
+    if (filter === 'More...') return true; // Handled by FilterSheet
+    // Handle dynamic filters from FilterSheet
+    if (BANK_OPTIONS.includes(filter)) return t.bank === filter;
+    if (PAYMENT_MODE_OPTIONS.includes(filter)) return t.paymentMode === filter;
+    if (SPENT_FOR_OPTIONS.includes(filter)) return t.spentFor === filter;
     return true;
   });
 
@@ -235,12 +309,19 @@ export default function HomeScreen({ user }) {
   const sections = Object.entries(grouped).map(([date, data]) => ({ title: date, data }));
 
   // ── Summary stats ────────────────────────────────────────────────────────────
+  // "This month"/"Today" stay expense-only (this is fundamentally an expense
+  // tracker) — income is surfaced separately via its own card + filter chip
+  // rather than netted into these figures.
   const todayStr = dayjs().format('DD MMM YYYY');
+  const isExpense = t => t.type !== 'income';
   const todayTotal = transactions
-    .filter(t => t.date === todayStr)
+    .filter(t => t.date === todayStr && isExpense(t))
     .reduce((sum, t) => sum + Number(t.cost), 0);
   const monthTotal = transactions
-    .filter(t => dayjs(t.date, 'DD MMM YYYY').month() === dayjs().month())
+    .filter(t => dayjs(t.date, 'DD MMM YYYY').month() === dayjs().month() && isExpense(t))
+    .reduce((sum, t) => sum + Number(t.cost), 0);
+  const monthIncomeTotal = transactions
+    .filter(t => dayjs(t.date, 'DD MMM YYYY').month() === dayjs().month() && t.type === 'income')
     .reduce((sum, t) => sum + Number(t.cost), 0);
 
   if (loading) {
@@ -264,14 +345,48 @@ export default function HomeScreen({ user }) {
           <TouchableOpacity style={styles.addCashHeaderBtn} onPress={() => setShowAddCash(true)}>
             <Text style={styles.addCashHeaderText}>+ Cash</Text>
           </TouchableOpacity>
+          <TouchableOpacity onPress={() => setShowPeriodView(true)}>
+            <Text style={styles.refreshIcon}>📅</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setShowFilterSheet(true)}>
+            <Text style={styles.refreshIcon}>🔽</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setSearchVisible(v => !v)}>
+            <Text style={styles.refreshIcon}>🔍</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setShowExport(true)}>
+            <Text style={styles.refreshIcon}>📤</Text>
+          </TouchableOpacity>
           <TouchableOpacity onPress={() => syncSMS()} disabled={syncing}>
             {syncing
               ? <ActivityIndicator color="#fff" size="small" />
               : <Text style={styles.refreshIcon}>🔄</Text>
             }
           </TouchableOpacity>
+          <TouchableOpacity onPress={handleLogout}>
+            <Text style={styles.refreshIcon}>🚪</Text>
+          </TouchableOpacity>
         </View>
       </View>
+
+      {/* Search bar (toggled via the header search icon) */}
+      {searchVisible ? (
+        <View style={styles.searchRow}>
+          <TextInput
+            style={styles.searchInput}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search by merchant, purpose, or bank..."
+            placeholderTextColor={colors.textHint}
+            autoFocus
+          />
+          {searchQuery ? (
+            <TouchableOpacity onPress={() => setSearchQuery('')}>
+              <Text style={styles.searchClear}>✕</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+      ) : null}
 
       {/* Sync status bar */}
       {syncMsg ? (
@@ -290,6 +405,10 @@ export default function HomeScreen({ user }) {
         <View style={styles.sumCard}>
           <Text style={styles.sumLabel}>Today</Text>
           <Text style={[styles.sumVal, { color: colors.danger }]}>₹{todayTotal.toLocaleString('en-IN')}</Text>
+        </View>
+        <View style={styles.sumCard}>
+          <Text style={styles.sumLabel}>Income</Text>
+          <Text style={[styles.sumVal, { color: colors.income }]}>₹{monthIncomeTotal.toLocaleString('en-IN')}</Text>
         </View>
         <View style={styles.sumCard}>
           <Text style={styles.sumLabel}>Transactions</Text>
@@ -330,7 +449,7 @@ export default function HomeScreen({ user }) {
           sections={sections}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => (
-            <TransactionItem transaction={item} onEdit={setEditTarget} />
+            <TransactionItem transaction={item} onEdit={setEditTarget} onDelete={handleDelete} />
           )}
           renderSectionHeader={({ section: { title, data } }) => (
             <View style={styles.sectionHeader}>
@@ -369,6 +488,29 @@ export default function HomeScreen({ user }) {
         onSave={handleAddCash}
         onClose={() => setShowAddCash(false)}
       />
+
+      {/* Export sheet */}
+      <ExportSheet
+        visible={showExport}
+        onClose={() => setShowExport(false)}
+      />
+
+      {/* Period view sheet */}
+      <PeriodViewSheet
+        visible={showPeriodView}
+        transactions={transactions}
+        onEdit={setEditTarget}
+        onDelete={handleDelete}
+        onClose={() => setShowPeriodView(false)}
+      />
+
+      {/* Filter sheet */}
+      <FilterSheet
+        visible={showFilterSheet}
+        currentFilter={filter}
+        onFilterSelect={setFilter}
+        onClose={() => setShowFilterSheet(false)}
+      />
     </View>
   );
 }
@@ -403,16 +545,30 @@ const styles = StyleSheet.create({
   syncMsg: { fontSize: 12, color: 'rgba(255,255,255,0.9)' },
 
   summaryRow: {
-    flexDirection: 'row', gap: 8, padding: 10,
+    flexDirection: 'row', flexWrap: 'wrap', gap: 8, padding: 10,
     backgroundColor: '#f0f4ff',
   },
   sumCard: {
-    flex: 1, backgroundColor: colors.surface,
+    flexBasis: '47%', flexGrow: 1, backgroundColor: colors.surface,
     borderRadius: 8, padding: 10,
     borderWidth: 0.5, borderColor: colors.border,
   },
   sumLabel: { fontSize: 10, color: colors.textSecondary },
   sumVal: { fontSize: 15, fontWeight: '700', color: colors.textPrimary, marginTop: 2 },
+
+  searchRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 16, paddingVertical: 8,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 0.5, borderBottomColor: colors.border,
+  },
+  searchInput: {
+    flex: 1, backgroundColor: '#f5f5f5', borderRadius: 8,
+    borderWidth: 0.5, borderColor: colors.border,
+    paddingHorizontal: 12, paddingVertical: 8,
+    fontSize: 14, color: colors.textPrimary,
+  },
+  searchClear: { fontSize: 16, color: colors.textSecondary, paddingHorizontal: 4 },
 
   filterRow: {
     flexDirection: 'row', gap: 6, paddingHorizontal: 12,

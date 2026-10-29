@@ -3,26 +3,41 @@
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  Modal, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator,
+  Modal, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, Image, Alert,
 } from 'react-native';
 import dayjs from 'dayjs';
 import { colors, SPENT_FOR_OPTIONS } from '../utils/theme';
+import { pickAndUploadReceipt } from '../services/receipts';
 
 const DEFAULT_FORM = {
   purpose: '',
   cost: '',
   date: dayjs().format('DD MMM YYYY'),
   spentFor: 'Self',
+  receiptUrl: null,
 };
 
 export default function AddCashSheet({ visible, onSave, onClose }) {
   const [form, setForm] = useState({ ...DEFAULT_FORM });
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState({});
+  const [uploadingReceipt, setUploadingReceipt] = useState(false);
 
   const update = (field, value) => {
     setForm(prev => ({ ...prev, [field]: value }));
     if (errors[field]) setErrors(prev => ({ ...prev, [field]: null }));
+  };
+
+  const handleAttachReceipt = async () => {
+    setUploadingReceipt(true);
+    try {
+      const url = await pickAndUploadReceipt();
+      if (url) update('receiptUrl', url);
+    } catch (err) {
+      Alert.alert('Upload failed', err.message);
+    } finally {
+      setUploadingReceipt(false);
+    }
   };
 
   const validate = () => {
@@ -41,6 +56,7 @@ export default function AddCashSheet({ visible, onSave, onClose }) {
     try {
       const txn = {
         id: `cash_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+        type: 'expense', // manual cash income entry isn't in scope — always an expense
         purpose: form.purpose.trim(),
         cost: parseFloat(form.cost),
         date: form.date.trim(),
@@ -52,6 +68,7 @@ export default function AddCashSheet({ visible, onSave, onClose }) {
         merchant: form.purpose.trim(),
         rawSMS: '',
         isCash: true,
+        receiptUrl: form.receiptUrl || null,
         synced: false,
       };
       await onSave(txn);
@@ -79,7 +96,7 @@ export default function AddCashSheet({ visible, onSave, onClose }) {
 
             <View style={styles.cashBadge}>
               <Text style={styles.cashBadgeText}>
-                💵  This will be saved as Cash in Google Sheets
+                💵  This will be saved as a Cash transaction
               </Text>
             </View>
 
@@ -143,6 +160,26 @@ export default function AddCashSheet({ visible, onSave, onClose }) {
                 </View>
               </View>
 
+              {/* Receipt */}
+              <View style={styles.group}>
+                <Text style={styles.label}>Receipt (optional)</Text>
+                {form.receiptUrl ? (
+                  <View style={styles.receiptPreviewWrap}>
+                    <Image source={{ uri: form.receiptUrl }} style={styles.receiptPreview} />
+                    <TouchableOpacity style={styles.receiptRemoveBtn} onPress={() => update('receiptUrl', null)}>
+                      <Text style={styles.receiptRemoveText}>Remove</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity style={styles.receiptAttachBtn} onPress={handleAttachReceipt} disabled={uploadingReceipt}>
+                    {uploadingReceipt
+                      ? <ActivityIndicator color={colors.primary} size="small" />
+                      : <Text style={styles.receiptAttachText}>📎 Attach Receipt Photo</Text>
+                    }
+                  </TouchableOpacity>
+                )}
+              </View>
+
               <View style={styles.btnRow}>
                 <TouchableOpacity style={styles.btnCancel} onPress={handleClose}>
                   <Text style={styles.btnCancelText}>Cancel</Text>
@@ -150,7 +187,7 @@ export default function AddCashSheet({ visible, onSave, onClose }) {
                 <TouchableOpacity style={styles.btnSave} onPress={handleSave} disabled={saving}>
                   {saving
                     ? <ActivityIndicator color="#fff" size="small" />
-                    : <Text style={styles.btnSaveText}>Save to Sheet</Text>
+                    : <Text style={styles.btnSaveText}>Save</Text>
                   }
                 </TouchableOpacity>
               </View>
@@ -210,4 +247,18 @@ const styles = StyleSheet.create({
     backgroundColor: colors.success, alignItems: 'center',
   },
   btnSaveText: { fontSize: 14, color: '#fff', fontWeight: '600' },
+  receiptAttachBtn: {
+    backgroundColor: '#f5f5f5', borderRadius: 8,
+    borderWidth: 0.5, borderColor: colors.border, borderStyle: 'dashed',
+    padding: 14, alignItems: 'center',
+  },
+  receiptAttachText: { fontSize: 13, color: colors.primary, fontWeight: '500' },
+  receiptPreviewWrap: { position: 'relative' },
+  receiptPreview: { width: '100%', height: 160, borderRadius: 8, backgroundColor: '#f5f5f5' },
+  receiptRemoveBtn: {
+    position: 'absolute', top: 8, right: 8,
+    backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 6,
+    paddingHorizontal: 8, paddingVertical: 4,
+  },
+  receiptRemoveText: { fontSize: 11, color: '#fff', fontWeight: '500' },
 });

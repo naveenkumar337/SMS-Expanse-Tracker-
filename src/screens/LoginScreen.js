@@ -2,107 +2,85 @@
 
 import React, { useState, useEffect } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet,
-  ActivityIndicator, Alert, Image, Linking,
+  View, Text, TextInput, TouchableOpacity, StyleSheet,
+  ActivityIndicator, Alert, ScrollView, KeyboardAvoidingView, Platform,
 } from 'react-native';
-import * as WebBrowser from 'expo-web-browser';
 import { colors } from '../utils/theme';
-import { signInWithGoogle, getCurrentUser, supabase, AUTH_REDIRECT_URI } from '../services/supabase';
+import { signIn, signUp, getStoredSession } from '../services/auth';
 
-WebBrowser.maybeCompleteAuthSession();
-
-// Supabase's default OAuth flow ("implicit") returns access_token/refresh_token
-// in the URL *fragment* (after '#'), not the query string (after '?'). Some
-// error responses instead use a '?' query string. This helper checks both,
-// without relying on the DOM URL/URLSearchParams APIs (which only parse the
-// '?' portion and can behave inconsistently under Hermes).
-function extractParamsFromUrl(url) {
-  const params = {};
-  const paramsString = url.split('#')[1] || url.split('?')[1] || '';
-  paramsString.split('&').forEach(pair => {
-    if (!pair) return;
-    const [key, value] = pair.split('=');
-    if (key) params[decodeURIComponent(key)] = decodeURIComponent(value || '');
-  });
-  return params;
-}
+const PHONE_REGEX = /^\d{10}$/;
 
 export default function LoginScreen({ onLoginSuccess }) {
+  const [mode, setMode] = useState('login'); // 'login' | 'signup'
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(true);
 
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+
   useEffect(() => {
-    // Check if user is already logged in
     checkExistingSession();
-
-    // Handle the case where the OAuth browser redirects back into the app
-    // while it's already running (e.g. backgrounded, not fully closed).
-    const subscription = Linking.addEventListener('url', ({ url }) => {
-      if (url.includes('auth/callback')) {
-        handleAuthCallback(url);
-      }
-    });
-
-    return () => subscription.remove();
   }, []);
 
   const checkExistingSession = async () => {
     try {
-      const user = await getCurrentUser();
-      if (user) {
-        onLoginSuccess(user);
-      }
-    } catch (err) {
-      console.log('No existing session');
+      const session = await getStoredSession();
+      if (session) onLoginSuccess(session);
     } finally {
       setChecking(false);
     }
   };
 
-  const handleLogin = async () => {
-    setLoading(true);
-    try {
-      const { url } = await signInWithGoogle();
-      // Opens the Google OAuth page in an in-app browser and waits for the
-      // redirect back to AUTH_REDIRECT_URI, returning that final URL directly
-      // (this is the current, supported replacement for the old/removed
-      // `AuthSession.startAsync`).
-      const result = await WebBrowser.openAuthSessionAsync(url, AUTH_REDIRECT_URI);
-
-      if (result.type === 'success' && result.url) {
-        await handleAuthCallback(result.url);
-      } else {
-        Alert.alert('Login cancelled', 'Please try again to continue.');
-      }
-    } catch (err) {
-      Alert.alert('Login failed', err.message);
-    } finally {
-      setLoading(false);
-    }
+  const resetFields = () => {
+    setName(''); setEmail(''); setPhone(''); setPassword(''); setConfirmPassword('');
   };
 
-  const handleAuthCallback = async (url) => {
-    try {
-      const params = extractParamsFromUrl(url);
+  const switchMode = (next) => {
+    setMode(next);
+    resetFields();
+  };
 
-      if (params.access_token && params.refresh_token) {
-        // Supabase doesn't auto-detect the redirect URL in React Native, so
-        // the session must be established explicitly. This is what actually
-        // triggers the 'SIGNED_IN' event that App.js listens for.
-        const { data, error } = await supabase.auth.setSession({
-          access_token: params.access_token,
-          refresh_token: params.refresh_token,
-        });
-        if (error) throw error;
-
-        const user = data?.user || (await getCurrentUser());
-        onLoginSuccess(user);
-      } else if (params.error) {
-        Alert.alert('Login failed', params.error_description || params.error);
+  const validate = () => {
+    if (!email.trim() || !password) {
+      Alert.alert('Missing details', 'Email and password are required.');
+      return false;
+    }
+    if (mode === 'signup') {
+      if (!name.trim()) {
+        Alert.alert('Missing details', 'Please enter your name.');
+        return false;
       }
+      if (!PHONE_REGEX.test(phone.trim())) {
+        Alert.alert('Invalid phone number', 'Please enter a valid 10-digit phone number.');
+        return false;
+      }
+      if (password.length < 6) {
+        Alert.alert('Weak password', 'Password must be at least 6 characters.');
+        return false;
+      }
+      if (password !== confirmPassword) {
+        Alert.alert('Passwords do not match', 'Please make sure both passwords match.');
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const handleSubmit = async () => {
+    if (!validate()) return;
+    setLoading(true);
+    try {
+      const session = mode === 'signup'
+        ? await signUp({ name: name.trim(), email: email.trim(), phone: phone.trim(), password })
+        : await signIn({ email: email.trim(), password });
+      onLoginSuccess(session);
     } catch (err) {
-      console.error('Auth callback error:', err);
-      Alert.alert('Login failed', err.message);
+      Alert.alert(mode === 'signup' ? 'Sign up failed' : 'Login failed', err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -115,47 +93,107 @@ export default function LoginScreen({ onLoginSuccess }) {
   }
 
   return (
-    <View style={styles.container}>
-      <View style={styles.card}>
-        <Text style={styles.appIcon}>💳</Text>
-        <Text style={styles.title}>SMS Expense Tracker</Text>
-        <Text style={styles.subtitle}>
-          Track your HDFC & Canara bank transactions automatically from SMS
-        </Text>
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+        <View style={styles.card}>
+          <Text style={styles.appIcon}>💳</Text>
+          <Text style={styles.title}>SMS Expense Tracker</Text>
+          <Text style={styles.subtitle}>
+            Track your HDFC & Canara bank transactions automatically from SMS
+          </Text>
 
-        <View style={styles.featureList}>
-          {[
-            '📩 Auto-reads bank SMS',
-            '📊 Saves to secure database',
-            '✏️ Edit & categorise transactions',
-            '👨‍👩‍👧 Track who you spent for',
-          ].map(f => (
-            <Text key={f} style={styles.feature}>{f}</Text>
-          ))}
+          <View style={styles.tabRow}>
+            <TouchableOpacity
+              style={[styles.tab, mode === 'login' && styles.tabActive]}
+              onPress={() => switchMode('login')}
+            >
+              <Text style={[styles.tabText, mode === 'login' && styles.tabTextActive]}>Login</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.tab, mode === 'signup' && styles.tabActive]}
+              onPress={() => switchMode('signup')}
+            >
+              <Text style={[styles.tabText, mode === 'signup' && styles.tabTextActive]}>Sign Up</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.form}>
+            {mode === 'signup' && (
+              <TextInput
+                style={styles.input}
+                placeholder="Full name"
+                placeholderTextColor={colors.textHint}
+                value={name}
+                onChangeText={setName}
+                autoCapitalize="words"
+              />
+            )}
+            <TextInput
+              style={styles.input}
+              placeholder="Email"
+              placeholderTextColor={colors.textHint}
+              value={email}
+              onChangeText={setEmail}
+              autoCapitalize="none"
+              keyboardType="email-address"
+            />
+            {mode === 'signup' && (
+              <TextInput
+                style={styles.input}
+                placeholder="Phone number"
+                placeholderTextColor={colors.textHint}
+                value={phone}
+                onChangeText={setPhone}
+                keyboardType="phone-pad"
+                maxLength={10}
+              />
+            )}
+            <TextInput
+              style={styles.input}
+              placeholder="Password"
+              placeholderTextColor={colors.textHint}
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+            />
+            {mode === 'signup' && (
+              <TextInput
+                style={styles.input}
+                placeholder="Confirm password"
+                placeholderTextColor={colors.textHint}
+                value={confirmPassword}
+                onChangeText={setConfirmPassword}
+                secureTextEntry
+              />
+            )}
+          </View>
+
+          <TouchableOpacity
+            style={styles.submitBtn}
+            onPress={handleSubmit}
+            disabled={loading}
+          >
+            {loading
+              ? <ActivityIndicator color="#fff" />
+              : <Text style={styles.submitBtnText}>{mode === 'signup' ? 'Create account' : 'Log in'}</Text>
+            }
+          </TouchableOpacity>
+
+          <Text style={styles.note}>
+            Your data stays in your own secure database. We never store it elsewhere.
+          </Text>
         </View>
-
-        <TouchableOpacity
-          style={styles.googleBtn}
-          onPress={handleLogin}
-          disabled={loading}
-        >
-          {loading
-            ? <ActivityIndicator color="#fff" />
-            : <Text style={styles.googleBtnText}>Sign in with Google</Text>
-          }
-        </TouchableOpacity>
-
-        <Text style={styles.note}>
-          Your data stays in your own secure database. We never store it elsewhere.
-        </Text>
-      </View>
-    </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+    flexGrow: 1,
     backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
@@ -174,16 +212,39 @@ const styles = StyleSheet.create({
     fontSize: 14, color: colors.textSecondary,
     textAlign: 'center', marginTop: 8, lineHeight: 20,
   },
-  featureList: { marginTop: 20, marginBottom: 24, width: '100%' },
-  feature: { fontSize: 14, color: colors.textPrimary, marginBottom: 8 },
-  googleBtn: {
+  tabRow: {
+    flexDirection: 'row',
+    backgroundColor: '#f0f0f0',
+    borderRadius: 10,
+    padding: 4,
+    width: '100%',
+    marginTop: 20,
+  },
+  tab: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center' },
+  tabActive: { backgroundColor: colors.primary },
+  tabText: { fontSize: 14, fontWeight: '600', color: colors.textSecondary },
+  tabTextActive: { color: '#fff' },
+  form: { width: '100%', marginTop: 18 },
+  input: {
+    backgroundColor: '#f5f5f5',
+    borderRadius: 10,
+    borderWidth: 0.5,
+    borderColor: colors.border,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 14,
+    color: colors.textPrimary,
+    marginBottom: 12,
+  },
+  submitBtn: {
     backgroundColor: colors.primary,
     paddingVertical: 14, paddingHorizontal: 32,
     borderRadius: 10, width: '100%', alignItems: 'center',
+    marginTop: 4,
   },
-  googleBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  submitBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
   note: {
     fontSize: 11, color: colors.textHint,
-    textAlign: 'center', marginTop: 14, lineHeight: 16,
+    textAlign: 'center', marginTop: 16, lineHeight: 16,
   },
 });

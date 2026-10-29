@@ -3,14 +3,16 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  Modal, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator,
+  Modal, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, Image, Alert,
 } from 'react-native';
 import { colors, SPENT_FOR_OPTIONS, BANK_OPTIONS, PAYMENT_MODE_OPTIONS } from '../utils/theme';
+import { pickAndUploadReceipt } from '../services/receipts';
 
 export default function EditTransactionSheet({ visible, transaction, onSave, onClose }) {
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState({});
+  const [uploadingReceipt, setUploadingReceipt] = useState(false);
 
   useEffect(() => {
     if (transaction) setForm({ ...transaction });
@@ -22,6 +24,18 @@ export default function EditTransactionSheet({ visible, transaction, onSave, onC
   const update = (field, value) => {
     setForm(prev => ({ ...prev, [field]: value }));
     if (errors[field]) setErrors(prev => ({ ...prev, [field]: null }));
+  };
+
+  const handleAttachReceipt = async () => {
+    setUploadingReceipt(true);
+    try {
+      const url = await pickAndUploadReceipt();
+      if (url) update('receiptUrl', url);
+    } catch (err) {
+      Alert.alert('Upload failed', err.message);
+    } finally {
+      setUploadingReceipt(false);
+    }
   };
 
   const validate = () => {
@@ -67,6 +81,25 @@ export default function EditTransactionSheet({ visible, transaction, onSave, onC
 
             <ScrollView showsVerticalScrollIndicator={false}>
 
+              {/* Transaction Type */}
+              <View style={styles.group}>
+                <Text style={styles.label}>Transaction Type</Text>
+                <View style={styles.row}>
+                  <TouchableOpacity
+                    style={[styles.typeBtn, form.type === 'expense' && styles.typeBtnActive]}
+                    onPress={() => update('type', 'expense')}
+                  >
+                    <Text style={[styles.typeBtnText, form.type === 'expense' && styles.typeBtnTextActive]}>Expense</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.typeBtn, form.type === 'income' && styles.typeBtnActive]}
+                    onPress={() => update('type', 'income')}
+                  >
+                    <Text style={[styles.typeBtnText, form.type === 'income' && styles.typeBtnTextActive]}>Income</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
               {/* Purpose */}
               <View style={styles.group}>
                 <Text style={styles.label}>Purpose</Text>
@@ -75,6 +108,18 @@ export default function EditTransactionSheet({ visible, transaction, onSave, onC
                   value={form.purpose}
                   onChangeText={v => update('purpose', v)}
                   placeholder="e.g. Food & Dining"
+                  placeholderTextColor={colors.textHint}
+                />
+              </View>
+
+              {/* Merchant */}
+              <View style={styles.group}>
+                <Text style={styles.label}>Merchant</Text>
+                <TextInput
+                  style={styles.input}
+                  value={form.merchant}
+                  onChangeText={v => update('merchant', v)}
+                  placeholder="e.g. Amazon, Swiggy"
                   placeholderTextColor={colors.textHint}
                 />
               </View>
@@ -152,6 +197,26 @@ export default function EditTransactionSheet({ visible, transaction, onSave, onC
                 </View>
               </View>
 
+              {/* Receipt */}
+              <View style={styles.group}>
+                <Text style={styles.label}>Receipt (optional)</Text>
+                {form.receiptUrl ? (
+                  <View style={styles.receiptPreviewWrap}>
+                    <Image source={{ uri: form.receiptUrl }} style={styles.receiptPreview} />
+                    <TouchableOpacity style={styles.receiptRemoveBtn} onPress={() => update('receiptUrl', null)}>
+                      <Text style={styles.receiptRemoveText}>Remove</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity style={styles.receiptAttachBtn} onPress={handleAttachReceipt} disabled={uploadingReceipt}>
+                    {uploadingReceipt
+                      ? <ActivityIndicator color={colors.primary} size="small" />
+                      : <Text style={styles.receiptAttachText}>📎 Attach Receipt Photo</Text>
+                    }
+                  </TouchableOpacity>
+                )}
+              </View>
+
               {/* Buttons */}
               <View style={styles.btnRow}>
                 <TouchableOpacity style={styles.btnCancel} onPress={onClose}>
@@ -160,7 +225,7 @@ export default function EditTransactionSheet({ visible, transaction, onSave, onC
                 <TouchableOpacity style={styles.btnSave} onPress={handleSave} disabled={saving}>
                   {saving
                     ? <ActivityIndicator color="#fff" size="small" />
-                    : <Text style={styles.btnSaveText}>Save to Sheet</Text>
+                    : <Text style={styles.btnSaveText}>Save</Text>
                   }
                 </TouchableOpacity>
               </View>
@@ -226,6 +291,17 @@ const styles = StyleSheet.create({
   pillText: { fontSize: 12, color: colors.textSecondary },
   pillTextActive: { color: '#fff' },
   hint: { fontSize: 10, color: colors.textHint, marginTop: 4 },
+  typeBtn: {
+    flex: 1, padding: 10,
+    borderRadius: 8,
+    borderWidth: 0.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+  },
+  typeBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  typeBtnText: { fontSize: 13, color: colors.textSecondary },
+  typeBtnTextActive: { color: '#fff', fontWeight: '600' },
   btnRow: { flexDirection: 'row', gap: 10, marginTop: 16 },
   btnCancel: {
     flex: 1, padding: 12,
@@ -242,4 +318,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   btnSaveText: { fontSize: 14, color: '#fff', fontWeight: '600' },
+  receiptAttachBtn: {
+    backgroundColor: '#f5f5f5', borderRadius: 8,
+    borderWidth: 0.5, borderColor: colors.border, borderStyle: 'dashed',
+    padding: 14, alignItems: 'center',
+  },
+  receiptAttachText: { fontSize: 13, color: colors.primary, fontWeight: '500' },
+  receiptPreviewWrap: { position: 'relative' },
+  receiptPreview: { width: '100%', height: 160, borderRadius: 8, backgroundColor: '#f5f5f5' },
+  receiptRemoveBtn: {
+    position: 'absolute', top: 8, right: 8,
+    backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 6,
+    paddingHorizontal: 8, paddingVertical: 4,
+  },
+  receiptRemoveText: { fontSize: 11, color: '#fff', fontWeight: '500' },
 });

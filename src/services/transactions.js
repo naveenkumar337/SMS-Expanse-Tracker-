@@ -1,7 +1,43 @@
 // src/services/transactions.js
-// Transaction CRUD operations using Supabase
+// Transaction CRUD operations, via the session-checked Postgres RPCs
+// (get_transactions/add_transaction/update_transaction/delete_transaction/
+// transaction_exists) defined in supabase-migration-custom-auth.sql. Every
+// call passes the locally-stored (user_id, token) pair so the RPC can
+// verify the caller is actually logged in as that user before touching
+// their rows — see auth.js for how that session is obtained/persisted.
 
 import { supabase } from './supabase';
+import { getStoredSession } from './auth';
+import dayjs from 'dayjs';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
+
+// Needed to reliably parse the "DD MMM YYYY" display-format date string (see
+// HomeScreen.js for the same plugin requirement) when deriving `txn_date`,
+// the proper sortable DATE column, from either a raw timestamp (new
+// SMS-parsed/cash transactions) or an edited display-date string.
+dayjs.extend(customParseFormat);
+
+// Converts either a raw timestamp (number) or a "DD MMM YYYY" display string
+// into a 'YYYY-MM-DD' string for the sortable `txn_date` DB column.
+function toTxnDate(rawDateOrDisplayString) {
+  if (rawDateOrDisplayString == null) return null;
+  const d = typeof rawDateOrDisplayString === 'number'
+    ? dayjs(rawDateOrDisplayString)
+    : dayjs(rawDateOrDisplayString, 'DD MMM YYYY');
+  return d.isValid() ? d.format('YYYY-MM-DD') : null;
+}
+
+// Resolves the current session, throwing the same "User not authenticated"
+// error the old Supabase-Auth-based code used to throw in this situation.
+async function requireSession() {
+  const session = await getStoredSession();
+  if (!session) throw new Error('User not authenticated');
+  return session;
+}
+
+function rpcErrorMessage(error, fallback) {
+  return error?.message?.replace(/^.*?:\s*/, '') || fallback;
+}
 
 // ─── Custom error for duplicate SMS-derived transactions ───────────────────────────
 export class DuplicateTransactionError extends Error {
@@ -11,24 +47,12 @@ export class DuplicateTransactionError extends Error {
   }
 }
 
-// ─── Get all transactions for current user ────────────────────────────────────────
-
-export const getTransactions = async () => {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('User not authenticated');
-
-  const { data, error } = await supabase
-    .from('transactions')
-    .select('*')
-    .eq('user_id', user.id)
-    .order('created_at', { ascending: false });
-
-  if (error) throw error;
-  
-  // Transform database format to app format
-  return data.map(txn => ({
+// Transform DB row format to app format
+function fromDbRow(txn) {
+  return {
     id: txn.id,
     smsId: txn.sms_id,
+    type: txn.type || 'expense',
     purpose: txn.purpose,
     cost: txn.amount,
     date: txn.date,
@@ -39,39 +63,50 @@ export const getTransactions = async () => {
     merchant: txn.merchant,
     rawSMS: txn.raw_sms,
     isCash: txn.is_cash,
+    receiptUrl: txn.receipt_url,
     synced: true,
-    rowIndex: data.indexOf(txn),
-  }));
+  };
+}
+
+// ─── Get all transactions for current user ────────────────────────────────────────
+
+export const getTransactions = async () => {
+  const session = await requireSession();
+
+  const { data, error } = await supabase.rpc('get_transactions', {
+    p_user_id: session.id,
+    p_token: session.token,
+  });
+  if (error) throw new Error(rpcErrorMessage(error, 'Failed to load transactions'));
+
+  return (data || []).map(fromDbRow);
 };
 
 // ─── Add new transaction ───────────────────────────────────────────────────────────
 
 export const addTransaction = async (transaction) => {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('User not authenticated');
+  const session = await requireSession();
 
-  const { data, error } = await supabase
-    .from('transactions')
-    .insert({
-      user_id: user.id,
-      // sms_id is the deterministic id produced by smsParser.js (same SMS -> same id).
-      // For manually-added cash transactions this is just their own generated id,
-      // which is fine since it's unique and not re-submitted on every sync.
-      sms_id: transaction.id || null,
-      amount: transaction.cost,
-      date: transaction.date,
-      merchant: transaction.merchant,
-      purpose: transaction.purpose,
-      bank: transaction.bank,
-      payment_mode: transaction.paymentMode,
-      spent_for: transaction.spentFor || 'Self',
-      raw_sms: transaction.rawSMS,
-      is_cash: transaction.isCash || false,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    })
-    .select()
-    .single();
+  const { data, error } = await supabase.rpc('add_transaction', {
+    p_user_id: session.id,
+    p_token: session.token,
+    // sms_id is the deterministic id produced by smsParser.js (same SMS -> same id).
+    // For manually-added cash transactions this is just their own generated id,
+    // which is fine since it's unique and not re-submitted on every sync.
+    p_sms_id: transaction.id || null,
+    p_type: transaction.type || 'expense',
+    p_amount: transaction.cost,
+    p_date: transaction.date,
+    p_txn_date: toTxnDate(transaction.rawDate ?? transaction.date),
+    p_merchant: transaction.merchant,
+    p_purpose: transaction.purpose,
+    p_bank: transaction.bank,
+    p_payment_mode: transaction.paymentMode,
+    p_spent_for: transaction.spentFor || 'Self',
+    p_raw_sms: transaction.rawSMS,
+    p_is_cash: transaction.isCash || false,
+    p_receipt_url: transaction.receiptUrl || null,
+  });
 
   if (error) {
     // 23505 = unique_violation -> this SMS was already imported (race condition
@@ -79,112 +114,67 @@ export const addTransaction = async (transaction) => {
     if (error.code === '23505') {
       throw new DuplicateTransactionError('Transaction already exists');
     }
-    throw error;
+    throw new Error(rpcErrorMessage(error, 'Failed to save transaction'));
   }
-  
-  // Transform to app format
-  return {
-    id: data.id,
-    smsId: data.sms_id,
-    purpose: data.purpose,
-    cost: data.amount,
-    date: data.date,
-    spentFor: data.spent_for,
-    bank: data.bank,
-    paymentMode: data.payment_mode,
-    bankPayment: `${data.bank || ''} — ${data.payment_mode || ''}`,
-    merchant: data.merchant,
-    rawSMS: data.raw_sms,
-    isCash: data.is_cash,
-    synced: true,
-  };
+
+  const row = Array.isArray(data) ? data[0] : data;
+  return fromDbRow(row);
 };
 
 // ─── Update existing transaction ───────────────────────────────────────────────────
 
 export const updateTransaction = async (transactionId, updates) => {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('User not authenticated');
+  const session = await requireSession();
 
-  const { data, error } = await supabase
-    .from('transactions')
-    .update({
-      amount: updates.cost,
-      date: updates.date,
-      merchant: updates.merchant,
-      purpose: updates.purpose,
-      bank: updates.bank,
-      payment_mode: updates.paymentMode,
-      spent_for: updates.spentFor || 'Self',
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', transactionId)
-    .eq('user_id', user.id)
-    .select()
-    .single();
+  const { data, error } = await supabase.rpc('update_transaction', {
+    p_user_id: session.id,
+    p_token: session.token,
+    p_id: transactionId,
+    p_type: updates.type || 'expense',
+    p_amount: updates.cost,
+    p_date: updates.date,
+    p_txn_date: toTxnDate(updates.date),
+    p_merchant: updates.merchant,
+    p_purpose: updates.purpose,
+    p_bank: updates.bank,
+    p_payment_mode: updates.paymentMode,
+    p_spent_for: updates.spentFor || 'Self',
+    p_receipt_url: updates.receiptUrl ?? null,
+  });
 
-  if (error) throw error;
-  
-  // Transform to app format
-  return {
-    id: data.id,
-    smsId: data.sms_id,
-    purpose: data.purpose,
-    cost: data.amount,
-    date: data.date,
-    spentFor: data.spent_for,
-    bank: data.bank,
-    paymentMode: data.payment_mode,
-    bankPayment: `${data.bank || ''} — ${data.payment_mode || ''}`,
-    merchant: data.merchant,
-    rawSMS: data.raw_sms,
-    isCash: data.is_cash,
-    synced: true,
-  };
+  if (error) throw new Error(rpcErrorMessage(error, 'Failed to update transaction'));
+
+  const row = Array.isArray(data) ? data[0] : data;
+  return fromDbRow(row);
 };
 
 // ─── Delete transaction ───────────────────────────────────────────────────────────
 
 export const deleteTransaction = async (transactionId) => {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('User not authenticated');
+  const session = await requireSession();
 
-  const { error } = await supabase
-    .from('transactions')
-    .delete()
-    .eq('id', transactionId)
-    .eq('user_id', user.id);
+  const { error } = await supabase.rpc('delete_transaction', {
+    p_user_id: session.id,
+    p_token: session.token,
+    p_id: transactionId,
+  });
 
-  if (error) throw error;
+  if (error) throw new Error(rpcErrorMessage(error, 'Failed to delete transaction'));
   return true;
-};
-
-// ─── Real-time subscription for transactions ───────────────────────────────────────
-
-export const subscribeToTransactions = (callback) => {
-  return supabase
-    .channel('transactions')
-    .on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: 'transactions'
-    }, callback)
-    .subscribe();
 };
 
 // ─── Check if transaction exists (for duplicate prevention) ───────────────────────
 
 export const transactionExists = async (transactionId) => {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return false;
+  const session = await getStoredSession();
+  if (!session) return false;
 
-  const { data, error } = await supabase
-    .from('transactions')
-    .select('id')
-    .eq('id', transactionId)
-    .eq('user_id', user.id)
-    .single();
+  const { data, error } = await supabase.rpc('transaction_exists', {
+    p_user_id: session.id,
+    p_token: session.token,
+    p_id: transactionId,
+  });
 
-  if (error && error.code !== 'PGRST116') return false; // PGRST116 = not found
+  if (error) return false;
   return !!data;
 };

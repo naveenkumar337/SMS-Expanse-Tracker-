@@ -186,10 +186,12 @@ export function extractMerchant(body) {
 
   // Patterns: "at MERCHANT", "to MERCHANT", "towards MERCHANT"
   // Lazy quantifier + lookahead so we stop at "on <date>"/punctuation instead of
-  // greedily swallowing trailing text like "AMAZON on 18-08-26".
+  // greedily swallowing trailing text like "AMAZON on 18-08-26". Also stop at
+  // ";"/":" — some templates (e.g. Canara's "to H K K PROVIS; UPI: ...")
+  // delimit fields with semicolons/colons instead of periods/commas.
   const patterns = [
-    /(?:at|to|towards|for)\s+([A-Za-z][A-Za-z0-9\s\.\-&']{1,30}?)(?=\s+on\s+\d|\s+for\s|\s+via\s|\s*\.|\s*,|\s*$)/i,
-    /(?:merchant[:\s]+)([A-Za-z][A-Za-z0-9\s\.\-&']{1,30}?)(?=\s+on\s+\d|\s*\.|\s*,|\s*$)/i,
+    /(?:at|to|towards|for)\s+([A-Za-z][A-Za-z0-9\s\.\-&']{1,30}?)(?=\s+on\s+\d|\s+for\s|\s+via\s|\s*\.|\s*,|\s*;|\s*:|\s*$)/i,
+    /(?:merchant[:\s]+)([A-Za-z][A-Za-z0-9\s\.\-&']{1,30}?)(?=\s+on\s+\d|\s*\.|\s*,|\s*;|\s*:|\s*$)/i,
   ];
 
   // Generic bank/fraud-reporting boilerplate that these SMS templates append
@@ -219,33 +221,56 @@ function simpleHash(str) {
   return Math.abs(hash).toString(36);
 }
 
-// ─── Check if SMS is a bank transaction ────────────────────────────────────────
-export function isBankTransaction(sender, body) {
+// ─── Classify SMS as a debit (expense) or credit (income) bank transaction ─────
+// Returns { isTransaction, type } where type is 'expense' | 'income'.
+//
+// Debit and credit keyword lists are plain substring checks EXCEPT for the
+// short bank abbreviations "Dr."/"Cr." (e.g. Canara's "Acct XXXXX76012 Dr.
+// INR 38.00..."), which need word-boundary-aware regex matching — a bare
+// substring check for "dr"/"cr" would false-positive on ordinary words like
+// "address" or "increment".
+const DR_ABBREVIATION = /\bdr\.?\b/i;
+const CR_ABBREVIATION = /\bcr\.?\b/i;
+
+export function classifyTransaction(sender, body) {
   const s = (sender + ' ' + body).toLowerCase();
 
   // Must be from known bank senders
   const bankSenders = ['hdfc', 'canara', 'cnrb', 'hdfcbk', 'canarabank'];
   const isBank = bankSenders.some(b => s.includes(b));
-  if (!isBank) return false;
+  if (!isBank) return { isTransaction: false, type: null };
 
-  // Must contain debit/transaction keywords
   // 'sent' and 'txn' cover HDFC's "Sent Rs.X From..." UPI transfer format
   // and "Txn Rs.X On <Bank> Card..." card-transaction format, both of which
   // don't use any of the other more generic keywords below.
-  const txnKeywords = ['debited', 'debit', 'spent', 'payment', 'paid', 'transaction', 'purchase', 'withdrawn', 'sent', 'txn'];
-  const hasTxn = txnKeywords.some(k => s.includes(k));
+  const debitKeywords = ['debited', 'debit', 'spent', 'payment', 'paid', 'transaction', 'purchase', 'withdrawn', 'sent', 'txn'];
+  const creditKeywords = ['credited', 'credit', 'received', 'refund'];
 
-  // Must contain amount pattern
+  const hasDebit = debitKeywords.some(k => s.includes(k)) || DR_ABBREVIATION.test(body);
+  const hasCredit = creditKeywords.some(k => s.includes(k)) || CR_ABBREVIATION.test(body);
+
+  // Must contain an amount pattern
   const hasAmount = /(?:rs\.?|inr\.?|₹)\s*\d+/i.test(body);
+  if (!hasAmount || (!hasDebit && !hasCredit)) return { isTransaction: false, type: null };
 
-  return hasTxn && hasAmount;
+  // If a message somehow matches both (rare/ambiguous templates), prefer
+  // debit — safer default than accidentally under-counting an expense.
+  return { isTransaction: true, type: hasDebit ? 'expense' : 'income' };
+}
+
+// ─── Check if SMS is a bank transaction (debit or credit) ─────────────────────
+// Thin boolean wrapper kept for backward compatibility with any existing caller
+// that only needs the yes/no answer, not the type.
+export function isBankTransaction(sender, body) {
+  return classifyTransaction(sender, body).isTransaction;
 }
 
 // ─── Main parse function ────────────────────────────────────────────────────────
 export function parseSMS(sms) {
   const { sender = '', body = '', date } = sms;
 
-  if (!isBankTransaction(sender, body)) return null;
+  const { isTransaction, type } = classifyTransaction(sender, body);
+  if (!isTransaction) return null;
 
   const bank = detectBank(sender, body);
   const paymentMode = detectPaymentMode(body);
@@ -261,6 +286,7 @@ export function parseSMS(sms) {
 
   return {
     id,
+    type, // 'expense' | 'income'
     purpose,
     merchant,
     cost: amount,

@@ -9,7 +9,7 @@ import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import ErrorBoundary from './src/components/ErrorBoundary';
-import { getCurrentUser, onAuthStateChange } from './src/services/supabase';
+import { getStoredSession } from './src/services/auth';
 import { colors } from './src/utils/theme';
 
 const Stack = createStackNavigator();
@@ -20,23 +20,12 @@ export default function App() {
 
   useEffect(() => {
     checkAuth();
-    
-    // Listen to authentication state changes
-    const { data: { subscription } } = onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_IN') {
-        setUser(session.user);
-      } else if (event === 'SIGNED_OUT') {
-        setUser(null);
-      }
-    });
-
-    return () => subscription.unsubscribe();
   }, []);
 
   const checkAuth = async () => {
     try {
-      const currentUser = await getCurrentUser();
-      setUser(currentUser);
+      const session = await getStoredSession();
+      setUser(session);
     } catch (err) {
       setUser(null);
     } finally {
@@ -59,7 +48,7 @@ export default function App() {
         <Stack.Navigator screenOptions={{ headerShown: false }}>
           {user ? (
             <Stack.Screen name="Home">
-              {(props) => <HomeScreen {...props} user={user} />}
+              {(props) => <HomeScreen {...props} user={user} onLogout={() => setUser(null)} />}
             </Stack.Screen>
           ) : (
             <Stack.Screen name="Login">

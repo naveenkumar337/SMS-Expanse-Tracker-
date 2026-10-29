@@ -15,6 +15,8 @@ export const colors = {
   textPrimary: '#212121',
   textSecondary: '#757575',
   textHint: '#9e9e9e',
+  income: '#2e7d32',
+  incomeLight: '#E8F5E9',
 
   // Spent For tag colors
   self: { bg: '#E3F2FD', text: '#1565c0' },
